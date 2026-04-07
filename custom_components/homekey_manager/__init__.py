@@ -77,6 +77,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.http.register_view(HomekeyKeysListView(hass))
     hass.http.register_view(HomekeyKeyDetailView(hass))
     hass.http.register_view(HomekeySettingsView(hass))
+    hass.http.register_view(HomekeyResetStatsView(hass))
 
     _LOGGER.info("HomeKey Manager v%s loaded", manifest_version)
     return True
@@ -191,5 +192,25 @@ class HomekeyKeyDetailView(HomeAssistantView):
         data["keys"] = [
             k for k in data.get("keys", []) if k.get("endpoint") != endpoint
         ]
+        await _save(self._hass)
+        return self.json({"ok": True})
+
+
+class HomekeyResetStatsView(HomeAssistantView):
+    """Handle POST /api/homekey_manager/reset-stats."""
+
+    url = f"/api/{DOMAIN}/reset-stats"
+    name = f"api:{DOMAIN}:reset_stats"
+    requires_auth = True
+
+    def __init__(self, hass):
+        self._hass = hass
+
+    async def post(self, request):
+        data = self._hass.data[DOMAIN]["data"]
+        for key in data.get("keys", []):
+            key["scanCount"] = 0
+            key["lastSeen"] = None
+            key["active"] = False
         await _save(self._hass)
         return self.json({"ok": True})

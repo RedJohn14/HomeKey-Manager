@@ -311,6 +311,15 @@ class HomekeyPanel extends HTMLElement {
     this._closeSettings();
   }
 
+  /* ---- Reset Stats ---- */
+
+  async _resetStats() {
+    if (!confirm("Alle Statistiken zur\u00fccksetzen?")) return;
+    await this._api("reset-stats", "POST");
+    await this._loadKeys();
+    this._showBanner("Statistiken zur\u00fcckgesetzt");
+  }
+
   /* ---- Dropdown ---- */
 
   _toggleMenu() {
@@ -424,6 +433,8 @@ class HomekeyPanel extends HTMLElement {
     <button class="btn" id="btnMenu">\u2699 Einstellungen \u25BE</button>
     <div class="dropdown" id="dropdownMenu">
       <button class="dropdown-item" id="menuSensors">Sensoren konfigurieren</button>
+      <div class="dropdown-sep"></div>
+      <button class="dropdown-item" id="menuResetStats">Statistik zur\u00fccksetzen</button>
     </div>
   </div>
 </div>
@@ -475,6 +486,7 @@ class HomekeyPanel extends HTMLElement {
     });
     $("#btnMenu").addEventListener("click", () => this._toggleMenu());
     $("#menuSensors").addEventListener("click", () => { this.$("#dropdownMenu").classList.remove("visible"); this._showSettings(); });
+    $("#menuResetStats").addEventListener("click", () => { this.$("#dropdownMenu").classList.remove("visible"); this._resetStats(); });
     $("#btnCancel").addEventListener("click", () => this._closeModal());
     $("#btnSave").addEventListener("click", () => this._saveRename());
     $("#modalOverlay").addEventListener("click", (e) => { if (e.target.id === "modalOverlay") this._closeModal(); });
