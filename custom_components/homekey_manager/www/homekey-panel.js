@@ -16,6 +16,7 @@ class HomekeyPanel extends HTMLElement {
     this._lastResultTs = 0;
     this._bannerTimeout = null;
     this._version = "";
+    this._pollInterval = null;
   }
 
   set panel(panel) {
@@ -25,29 +26,53 @@ class HomekeyPanel extends HTMLElement {
   }
 
   set hass(hass) {
-    const oldHass = this._hass;
     this._hass = hass;
 
     if (!this._initialized) {
       this._buildUI();
       this._initData();
       this._initialized = true;
-    } else if (!oldHass || !oldHass.connected) {
-      this._loadKeys();
     }
-
-    this._checkSensor();
   }
 
   async _initData() {
     await this._loadSettings();
     await this._loadKeys();
-    // Record current sensor timestamp so we only detect NEW scans
+    // Record current sensor timestamp
     if (this._hass && this._settings.sensor_result) {
       const sensor = this._hass.states[this._settings.sensor_result];
       if (sensor && sensor.last_updated) {
         this._lastResultTs = new Date(sensor.last_updated).getTime();
         this._setStatus("online", "Verbunden \u00b7 live");
+      }
+    }
+    // Start polling every 2 seconds for reliable scan detection
+    this._startPolling();
+  }
+
+  _startPolling() {
+    if (this._pollInterval) clearInterval(this._pollInterval);
+    this._pollInterval = setInterval(() => this._pollSensor(), 2000);
+  }
+
+  _pollSensor() {
+    if (!this._hass || !this._settings.sensor_result) return;
+
+    const sensor = this._hass.states[this._settings.sensor_result];
+    if (!sensor) {
+      this._setStatus("offline", "Sensor nicht gefunden");
+      return;
+    }
+
+    this._setStatus("online", "Verbunden \u00b7 live");
+
+    const ts = new Date(sensor.last_updated).getTime();
+    if (sensor.state === "success" && ts > this._lastResultTs) {
+      this._lastResultTs = ts;
+      const issuer = this._hass.states[this._settings.sensor_issuer]?.state || "";
+      const endpoint = this._hass.states[this._settings.sensor_endpoint]?.state || "";
+      if (endpoint && endpoint !== "unknown" && endpoint.length > 2) {
+        this._handleScan(issuer, endpoint);
       }
     }
   }
@@ -62,35 +87,13 @@ class HomekeyPanel extends HTMLElement {
 
   disconnectedCallback() {
     clearInterval(this._statsInterval);
+    clearInterval(this._pollInterval);
     this._initialized = false;
   }
 
-  /* ---- Sensor monitoring ---- */
-
-  _checkSensor() {
-    const sResult = this._settings.sensor_result;
-    if (!sResult || !this._lastResultTs) return;
-
-    const sensor = this._hass.states[sResult];
-    if (!sensor) {
-      this._setStatus("offline", "Sensor nicht gefunden");
-      return;
-    }
-
-    this._setStatus("online", "Verbunden \u00b7 live");
-
-    const ts = new Date(sensor.last_updated).getTime();
-    if (sensor.state === "success" && ts > this._lastResultTs) {
-      this._lastResultTs = ts;
-      const issuer = this._hass.states[this._settings.sensor_issuer]?.state;
-      const endpoint = this._hass.states[this._settings.sensor_endpoint]?.state || "";
-      if (issuer && issuer !== "unknown" && issuer.length > 4) {
-        this._handleScan(issuer, endpoint);
-      }
-    }
-  }
-
   /* ---- API ---- */
+
+  $(sel) { return this.shadowRoot.querySelector(sel); }
 
   async _api(path, method = "GET", body = null) {
     try {
@@ -120,12 +123,14 @@ class HomekeyPanel extends HTMLElement {
   }
 
   async _handleScan(issuer, endpoint) {
-    const existing = this._keys.find((k) => k.issuer === issuer);
+    // Match by endpoint (unique per device)
+    const existing = this._keys.find((k) => k.endpoint === endpoint);
     if (existing) {
-      await this._api("keys/" + encodeURIComponent(issuer), "PUT", {
+      await this._api("keys/" + encodeURIComponent(endpoint), "PUT", {
         lastSeen: new Date().toISOString(),
         scanCount: (existing.scanCount || 0) + 1,
         active: true,
+        issuer: issuer,
       });
       this._showBanner("Scan erkannt: " + existing.name);
     } else {
@@ -142,8 +147,6 @@ class HomekeyPanel extends HTMLElement {
   }
 
   /* ---- UI helpers ---- */
-
-  $(sel) { return this.shadowRoot.querySelector(sel); }
 
   _setStatus(s, t) {
     const dot = this.$("#statusDot");
@@ -201,7 +204,7 @@ class HomekeyPanel extends HTMLElement {
   _render() {
     const q = (this.$("#searchInput")?.value || "").toLowerCase();
     const filtered = this._keys.filter(
-      (k) => k.name.toLowerCase().includes(q) || k.issuer.toLowerCase().includes(q)
+      (k) => k.name.toLowerCase().includes(q) || (k.endpoint || "").toLowerCase().includes(q) || (k.issuer || "").toLowerCase().includes(q)
     );
     const list = this.$("#keyList");
     if (!list) return;
@@ -213,18 +216,19 @@ class HomekeyPanel extends HTMLElement {
 
     list.innerHTML = filtered.map((k) => {
       const idx = this._keys.indexOf(k);
-      const col = this._colorFor(k.issuer);
+      const col = this._colorFor(k.endpoint || k.issuer || "?");
       const active = k.active && this._isToday(k.lastSeen);
       return '<div class="card"><div class="key-header">' +
         '<div class="avatar" style="background:' + col.bg + ";color:" + col.text + ';">' + this._initials(k.name) + "</div>" +
-        '<div class="key-info"><div class="key-name">' + this._esc(k.name) + '</div><div class="key-id">' + this._esc(k.issuer) + "</div></div>" +
+        '<div class="key-info"><div class="key-name">' + this._esc(k.name) + "</div>" +
+        '<div class="key-id">Endpoint: ' + this._esc(k.endpoint || "\u2014") + "</div>" +
+        '<div class="key-id">Issuer: ' + this._esc(k.issuer || "\u2014") + "</div></div>" +
         '<span class="badge ' + (active ? "badge-active" : "badge-inactive") + '">' + (active ? "aktiv" : "inaktiv") + "</span>" +
-        '<div class="key-actions"><button class="btn" data-edit="' + idx + '">Umbenennen</button>' +
-        '<button class="btn btn-danger" data-delete="' + idx + '">L\u00f6schen</button></div></div>' +
+        '<div class="key-actions"><button class="btn" data-edit="' + idx + '"><span>Umbenennen</span></button>' +
+        '<button class="btn btn-danger" data-delete="' + idx + '"><span>L\u00f6schen</span></button></div></div>' +
         '<div class="key-meta"><span>Letzter Scan: <span class="meta-val">' + this._timeAgo(k.lastSeen) + "</span></span>" +
         '<span>Scans: <span class="meta-val">' + (k.scanCount || 0) + "</span></span>" +
         '<span>Hinzugef\u00fcgt: <span class="meta-val">' + (k.added ? new Date(k.added).toLocaleDateString("de-DE") : "\u2014") + "</span></span>" +
-        (k.endpoint ? '<span>Endpoint: <span class="meta-val mono">' + this._esc(k.endpoint.slice(0, 18)) + "\u2026</span></span>" : "") +
         "</div></div>";
     }).join("");
 
@@ -254,9 +258,10 @@ class HomekeyPanel extends HTMLElement {
     this._editIdx = idx;
     this.$("#modalTitle").textContent = idx !== null ? "Key umbenennen" : "Key manuell hinzuf\u00fcgen";
     this.$("#mName").value = idx !== null ? this._keys[idx].name : "";
-    this.$("#mIssuer").value = idx !== null ? this._keys[idx].issuer : "";
-    this.$("#mIssuer").disabled = idx !== null;
     this.$("#mEndpoint").value = idx !== null ? this._keys[idx].endpoint || "" : "";
+    this.$("#mEndpoint").disabled = idx !== null;
+    this.$("#mIssuer").value = idx !== null ? this._keys[idx].issuer || "" : "";
+    this.$("#mIssuer").disabled = idx !== null;
     this.$("#modalOverlay").style.display = "flex";
     setTimeout(() => this.$("#mName").focus(), 50);
   }
@@ -265,13 +270,13 @@ class HomekeyPanel extends HTMLElement {
 
   async _saveKey() {
     const name = this.$("#mName").value.trim();
-    const issuer = this.$("#mIssuer").value.trim();
     const endpoint = this.$("#mEndpoint").value.trim();
+    const issuer = this.$("#mIssuer").value.trim();
     if (!name) { alert("Name erforderlich"); return; }
     if (this._editIdx !== null) {
-      await this._api("keys/" + encodeURIComponent(this._keys[this._editIdx].issuer), "PUT", { name });
+      await this._api("keys/" + encodeURIComponent(this._keys[this._editIdx].endpoint), "PUT", { name });
     } else {
-      if (!issuer) { alert("Issuer ID erforderlich"); return; }
+      if (!endpoint) { alert("Endpoint ID erforderlich"); return; }
       await this._api("keys", "POST", { name, issuer, endpoint, active: true, lastSeen: null, scanCount: 0, added: new Date().toISOString() });
     }
     await this._loadKeys();
@@ -280,7 +285,7 @@ class HomekeyPanel extends HTMLElement {
 
   async _deleteKey(idx) {
     if (!confirm('"' + this._keys[idx].name + '" wirklich l\u00f6schen?')) return;
-    await this._api("keys/" + encodeURIComponent(this._keys[idx].issuer), "DELETE");
+    await this._api("keys/" + encodeURIComponent(this._keys[idx].endpoint), "DELETE");
     await this._loadKeys();
   }
 
@@ -308,6 +313,7 @@ class HomekeyPanel extends HTMLElement {
       const sensor = this._hass.states[this._settings.sensor_result];
       if (sensor) this._lastResultTs = new Date(sensor.last_updated).getTime();
       this._showBanner("Einstellungen gespeichert");
+      this._startPolling();
     }
     this._closeSettings();
   }
@@ -343,8 +349,6 @@ class HomekeyPanel extends HTMLElement {
     --accent: var(--ha-card-header-color, #4a90d9);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  /* Toolbar */
   .toolbar {
     display: flex; align-items: center; justify-content: space-between;
     padding: 12px 16px; background: var(--card-bg); border-bottom: 1px solid var(--border);
@@ -369,27 +373,21 @@ class HomekeyPanel extends HTMLElement {
   .dropdown-item { display: block; width: 100%; padding: 11px 16px; font-size: 13px; color: var(--text); background: transparent; border: none; text-align: left; cursor: pointer; }
   .dropdown-item:hover { background: rgba(255,255,255,0.06); }
   .dropdown-sep { height: 1px; background: var(--border); }
-
-  /* Content */
   .content { padding: 16px; background: var(--bg); min-height: calc(100vh - 56px); }
   .status-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; font-size: 13px; color: var(--text2); }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #fdd663; flex-shrink: 0; }
   .status-dot.online { background: #81c995; animation: pulse 2s infinite; }
   .status-dot.offline { background: #f28b82; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
   .stat { background: var(--card-bg); border-radius: 10px; padding: 14px; }
   .stat-label { font-size: 12px; color: var(--text2); margin-bottom: 4px; }
   .stat-value { font-size: 22px; font-weight: 500; color: var(--text); }
-
   .scan-banner { background: rgba(74,144,217,0.15); border: 1px solid var(--accent); border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #8ab4f8; display: none; }
   .scan-banner.visible { display: block; }
-
   .toolbar-search { margin-bottom: 14px; }
   .toolbar-search input { width: 100%; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 14px; color: var(--text); font-size: 14px; outline: none; }
   .toolbar-search input:focus { border-color: var(--accent); }
-
   .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
   .key-header { display: flex; align-items: center; gap: 12px; }
   .avatar { width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 500; flex-shrink: 0; }
@@ -402,9 +400,7 @@ class HomekeyPanel extends HTMLElement {
   .key-actions { display: flex; gap: 8px; margin-left: 8px; }
   .key-meta { display: flex; gap: 20px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text2); flex-wrap: wrap; }
   .meta-val { color: var(--text); font-weight: 500; }
-  .mono { font-family: monospace; font-size: 11px; }
   .empty { text-align: center; padding: 40px 20px; color: var(--text2); font-size: 14px; line-height: 1.8; }
-
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 100; }
   .dialog { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 24px; width: 360px; max-width: 90vw; }
   .dialog-title { font-size: 17px; font-weight: 500; margin-bottom: 18px; color: var(--text); }
@@ -413,20 +409,17 @@ class HomekeyPanel extends HTMLElement {
   .dialog input:focus { border-color: var(--accent); }
   .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
   .dialog-hint { font-size: 11px; color: var(--text2); margin-bottom: 14px; }
-
-  /* Mobile */
   @media (max-width: 600px) {
     .hamburger-btn { display: flex; }
     .key-actions .btn span { display: none; }
-    .key-actions .btn { padding: 6px 10px; }
-    .stats { grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .key-actions .btn { padding: 6px 10px; font-size: 16px; }
+    .stats { gap: 8px; }
     .stat { padding: 10px; }
     .stat-value { font-size: 18px; }
-    .key-header { gap: 8px; flex-wrap: wrap; }
+    .key-header { gap: 8px; }
     .key-meta { gap: 12px; }
   }
 </style>
-
 <div class="toolbar">
   <div class="toolbar-left">
     <button class="hamburger-btn" id="btnHamburger">
@@ -443,7 +436,6 @@ class HomekeyPanel extends HTMLElement {
     </div>
   </div>
 </div>
-
 <div class="content">
   <div class="status-bar">
     <div class="status-dot" id="statusDot"></div>
@@ -455,28 +447,24 @@ class HomekeyPanel extends HTMLElement {
     <div class="stat"><div class="stat-label">Letzter Scan</div><div class="stat-value" style="font-size:15px;padding-top:4px;" id="statLast">\u2014</div></div>
   </div>
   <div id="scanBanner" class="scan-banner"></div>
-  <div class="toolbar-search">
-    <input type="text" id="searchInput" placeholder="Keys durchsuchen...">
-  </div>
+  <div class="toolbar-search"><input type="text" id="searchInput" placeholder="Keys durchsuchen..."></div>
   <div id="keyList"></div>
 </div>
-
 <div id="modalOverlay" class="overlay">
   <div class="dialog">
     <div class="dialog-title" id="modalTitle">Key hinzuf\u00fcgen</div>
     <label>Name / Ger\u00e4t</label>
     <input type="text" id="mName" placeholder="z.B. iPhone">
-    <label>Issuer ID</label>
-    <input type="text" id="mIssuer" placeholder="UUID aus dem Log">
-    <label>Endpoint ID (optional)</label>
-    <input type="text" id="mEndpoint" placeholder="optional">
+    <label>Endpoint ID (Ger\u00e4t)</label>
+    <input type="text" id="mEndpoint" placeholder="Endpoint ID">
+    <label>Issuer ID (Besitzer)</label>
+    <input type="text" id="mIssuer" placeholder="Issuer ID (optional)">
     <div class="dialog-actions">
       <button class="btn" id="btnCancel">Abbrechen</button>
       <button class="btn btn-primary" id="btnSave">Speichern</button>
     </div>
   </div>
 </div>
-
 <div id="settingsOverlay" class="overlay">
   <div class="dialog">
     <div class="dialog-title">Sensoren konfigurieren</div>
@@ -495,7 +483,6 @@ class HomekeyPanel extends HTMLElement {
 </div>`;
 
     const $ = (s) => this.shadowRoot.querySelector(s);
-
     $("#btnHamburger").addEventListener("click", () => {
       this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }));
     });
@@ -509,10 +496,7 @@ class HomekeyPanel extends HTMLElement {
     $("#btnSettingsCancel").addEventListener("click", () => this._closeSettings());
     $("#btnSettingsSave").addEventListener("click", () => this._saveSettings());
 
-    if (this._version) {
-      $("#versionTag").textContent = "v" + this._version;
-    }
-
+    if (this._version) $("#versionTag").textContent = "v" + this._version;
     this._statsInterval = setInterval(() => this._updateStats(), 30000);
   }
 }

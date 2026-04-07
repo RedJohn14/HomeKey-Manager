@@ -2,7 +2,7 @@
   "domain": "homekey_manager",
   "name": "HomeKey Manager",
   "documentation": "https://github.com/RedJohn14/homekey-manager",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "config_flow": true,
   "codeowners": ["@RedJohn14"],
   "dependencies": ["http", "frontend", "panel_custom"],

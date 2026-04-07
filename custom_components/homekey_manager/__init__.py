@@ -59,7 +59,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     with open(manifest_path) as f:
         manifest_version = json.load(f).get("version", "0")
 
-    # Remove panel first if it already exists (e.g. after failed unload)
     try:
         async_remove_panel(hass, PANEL_FRONTEND_PATH)
     except Exception:
@@ -145,15 +144,17 @@ class HomekeyKeysListView(HomeAssistantView):
         data = self._hass.data[DOMAIN]["data"]
         keys = data.get("keys", [])
 
+        # Match by endpoint (unique per device)
+        endpoint = body.get("endpoint", "")
         existing = next(
-            (k for k in keys if k["issuer"] == body.get("issuer")), None
+            (k for k in keys if k.get("endpoint") == endpoint and endpoint),
+            None,
         )
         if existing:
             existing["lastSeen"] = body.get("lastSeen", existing.get("lastSeen"))
             existing["scanCount"] = existing.get("scanCount", 0) + 1
             existing["active"] = True
-            if body.get("endpoint"):
-                existing["endpoint"] = body["endpoint"]
+            existing["issuer"] = body.get("issuer", existing.get("issuer"))
         else:
             keys.append(body)
 
@@ -163,21 +164,21 @@ class HomekeyKeysListView(HomeAssistantView):
 
 
 class HomekeyKeyDetailView(HomeAssistantView):
-    """Handle PUT/DELETE /api/homekey_manager/keys/{issuer}."""
+    """Handle PUT/DELETE /api/homekey_manager/keys/{endpoint}."""
 
-    url = f"/api/{DOMAIN}/keys/{{issuer}}"
+    url = f"/api/{DOMAIN}/keys/{{endpoint}}"
     name = f"api:{DOMAIN}:key_detail"
     requires_auth = True
 
     def __init__(self, hass):
         self._hass = hass
 
-    async def put(self, request, issuer):
+    async def put(self, request, endpoint):
         body = await request.json()
         data = self._hass.data[DOMAIN]["data"]
         keys = data.get("keys", [])
 
-        key = next((k for k in keys if k["issuer"] == issuer), None)
+        key = next((k for k in keys if k.get("endpoint") == endpoint), None)
         if not key:
             return self.json_message("Not found", status_code=404)
 
@@ -185,8 +186,10 @@ class HomekeyKeyDetailView(HomeAssistantView):
         await _save(self._hass)
         return self.json({"ok": True})
 
-    async def delete(self, request, issuer):
+    async def delete(self, request, endpoint):
         data = self._hass.data[DOMAIN]["data"]
-        data["keys"] = [k for k in data.get("keys", []) if k["issuer"] != issuer]
+        data["keys"] = [
+            k for k in data.get("keys", []) if k.get("endpoint") != endpoint
+        ]
         await _save(self._hass)
         return self.json({"ok": True})
