@@ -38,11 +38,11 @@ class HomekeyPanel extends HTMLElement {
   async _initData() {
     await this._loadSettings();
     await this._loadKeys();
-    // Record current sensor timestamp
-    if (this._hass && this._settings.sensor_result) {
-      const sensor = this._hass.states[this._settings.sensor_result];
-      if (sensor && sensor.last_updated) {
-        this._lastResultTs = new Date(sensor.last_updated).getTime();
+    // Record current endpoint sensor timestamp (changes with every different device scan)
+    if (this._hass && this._settings.sensor_endpoint) {
+      const epSensor = this._hass.states[this._settings.sensor_endpoint];
+      if (epSensor && epSensor.last_updated) {
+        this._lastResultTs = new Date(epSensor.last_updated).getTime();
         this._setStatus("online", "Verbunden \u00b7 live");
       }
     }
@@ -56,23 +56,28 @@ class HomekeyPanel extends HTMLElement {
   }
 
   _pollSensor() {
-    if (!this._hass || !this._settings.sensor_result) return;
+    if (!this._hass || !this._settings.sensor_endpoint) return;
 
-    const sensor = this._hass.states[this._settings.sensor_result];
-    if (!sensor) {
+    // Watch endpoint sensor for changes (value changes per device, guarantees last_updated update)
+    const epSensor = this._hass.states[this._settings.sensor_endpoint];
+    if (!epSensor) {
       this._setStatus("offline", "Sensor nicht gefunden");
       return;
     }
 
     this._setStatus("online", "Verbunden \u00b7 live");
 
-    const ts = new Date(sensor.last_updated).getTime();
-    if (sensor.state === "success" && ts > this._lastResultTs) {
-      this._lastResultTs = ts;
-      const issuer = this._hass.states[this._settings.sensor_issuer]?.state || "";
-      const endpoint = this._hass.states[this._settings.sensor_endpoint]?.state || "";
-      if (endpoint && endpoint !== "unknown" && endpoint.length > 2) {
-        this._handleScan(issuer, endpoint);
+    const ts = new Date(epSensor.last_updated).getTime();
+    if (ts > this._lastResultTs) {
+      // Check result sensor for success
+      const resultSensor = this._hass.states[this._settings.sensor_result];
+      if (resultSensor?.state === "success") {
+        this._lastResultTs = ts;
+        const issuer = this._hass.states[this._settings.sensor_issuer]?.state || "";
+        const endpoint = epSensor.state || "";
+        if (endpoint && endpoint !== "unknown" && endpoint.length > 2) {
+          this._handleScan(issuer, endpoint);
+        }
       }
     }
   }
@@ -233,7 +238,7 @@ class HomekeyPanel extends HTMLElement {
     }).join("");
 
     list.querySelectorAll("[data-edit]").forEach((btn) =>
-      btn.addEventListener("click", () => this._showModal(parseInt(btn.dataset.edit)))
+      btn.addEventListener("click", () => this._showRename(parseInt(btn.dataset.edit)))
     );
     list.querySelectorAll("[data-delete]").forEach((btn) =>
       btn.addEventListener("click", () => this._deleteKey(parseInt(btn.dataset.delete)))
@@ -252,33 +257,21 @@ class HomekeyPanel extends HTMLElement {
     }
   }
 
-  /* ---- Key Modal ---- */
+  /* ---- Rename Modal ---- */
 
-  _showModal(idx = null) {
+  _showRename(idx) {
     this._editIdx = idx;
-    this.$("#modalTitle").textContent = idx !== null ? "Key umbenennen" : "Key manuell hinzuf\u00fcgen";
-    this.$("#mName").value = idx !== null ? this._keys[idx].name : "";
-    this.$("#mEndpoint").value = idx !== null ? this._keys[idx].endpoint || "" : "";
-    this.$("#mEndpoint").disabled = idx !== null;
-    this.$("#mIssuer").value = idx !== null ? this._keys[idx].issuer || "" : "";
-    this.$("#mIssuer").disabled = idx !== null;
+    this.$("#mName").value = this._keys[idx].name;
     this.$("#modalOverlay").style.display = "flex";
     setTimeout(() => this.$("#mName").focus(), 50);
   }
 
   _closeModal() { this.$("#modalOverlay").style.display = "none"; this._editIdx = null; }
 
-  async _saveKey() {
+  async _saveRename() {
     const name = this.$("#mName").value.trim();
-    const endpoint = this.$("#mEndpoint").value.trim();
-    const issuer = this.$("#mIssuer").value.trim();
     if (!name) { alert("Name erforderlich"); return; }
-    if (this._editIdx !== null) {
-      await this._api("keys/" + encodeURIComponent(this._keys[this._editIdx].endpoint), "PUT", { name });
-    } else {
-      if (!endpoint) { alert("Endpoint ID erforderlich"); return; }
-      await this._api("keys", "POST", { name, issuer, endpoint, active: true, lastSeen: null, scanCount: 0, added: new Date().toISOString() });
-    }
+    await this._api("keys/" + encodeURIComponent(this._keys[this._editIdx].endpoint), "PUT", { name });
     await this._loadKeys();
     this._closeModal();
   }
@@ -310,8 +303,8 @@ class HomekeyPanel extends HTMLElement {
     if (result) {
       this._settings = result;
       this._lastResultTs = 0;
-      const sensor = this._hass.states[this._settings.sensor_result];
-      if (sensor) this._lastResultTs = new Date(sensor.last_updated).getTime();
+      const epSensor = this._hass.states[this._settings.sensor_endpoint];
+      if (epSensor) this._lastResultTs = new Date(epSensor.last_updated).getTime();
       this._showBanner("Einstellungen gespeichert");
       this._startPolling();
     }
@@ -430,8 +423,6 @@ class HomekeyPanel extends HTMLElement {
   <div class="menu-wrap">
     <button class="btn" id="btnMenu">\u2699 Einstellungen \u25BE</button>
     <div class="dropdown" id="dropdownMenu">
-      <button class="dropdown-item" id="menuAddKey">+ Key hinzuf\u00fcgen</button>
-      <div class="dropdown-sep"></div>
       <button class="dropdown-item" id="menuSensors">Sensoren konfigurieren</button>
     </div>
   </div>
@@ -452,13 +443,9 @@ class HomekeyPanel extends HTMLElement {
 </div>
 <div id="modalOverlay" class="overlay">
   <div class="dialog">
-    <div class="dialog-title" id="modalTitle">Key hinzuf\u00fcgen</div>
+    <div class="dialog-title">Key umbenennen</div>
     <label>Name / Ger\u00e4t</label>
     <input type="text" id="mName" placeholder="z.B. iPhone">
-    <label>Endpoint ID (Ger\u00e4t)</label>
-    <input type="text" id="mEndpoint" placeholder="Endpoint ID">
-    <label>Issuer ID (Besitzer)</label>
-    <input type="text" id="mIssuer" placeholder="Issuer ID (optional)">
     <div class="dialog-actions">
       <button class="btn" id="btnCancel">Abbrechen</button>
       <button class="btn btn-primary" id="btnSave">Speichern</button>
@@ -487,10 +474,9 @@ class HomekeyPanel extends HTMLElement {
       this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }));
     });
     $("#btnMenu").addEventListener("click", () => this._toggleMenu());
-    $("#menuAddKey").addEventListener("click", () => { this.$("#dropdownMenu").classList.remove("visible"); this._showModal(); });
     $("#menuSensors").addEventListener("click", () => { this.$("#dropdownMenu").classList.remove("visible"); this._showSettings(); });
     $("#btnCancel").addEventListener("click", () => this._closeModal());
-    $("#btnSave").addEventListener("click", () => this._saveKey());
+    $("#btnSave").addEventListener("click", () => this._saveRename());
     $("#modalOverlay").addEventListener("click", (e) => { if (e.target.id === "modalOverlay") this._closeModal(); });
     $("#searchInput").addEventListener("input", () => this._render());
     $("#btnSettingsCancel").addEventListener("click", () => this._closeSettings());
